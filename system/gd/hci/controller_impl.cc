@@ -21,6 +21,7 @@
 #include <bluetooth/metrics/os_metrics.h>
 #include <com_android_bluetooth_flags.h>
 
+#include <cstdlib>
 #include <future>
 #include <memory>
 #include <string>
@@ -48,6 +49,9 @@ constexpr bool kDefaultRpaOffload = false;
 static const std::string kPropertyVendorCapabilitiesEnabled =
         "bluetooth.core.le.vendor_capabilities.enabled";
 static const std::string kPropertyRpaOffload = "bluetooth.core.le.rpa_offload";
+// Comma-separated supported-command indexes (octet * 10 + bit) to hide from the stack,
+// for controllers that advertise commands they do not implement correctly.
+static const std::string kPropertyDisabledCommands = "bluetooth.hci.disabled_commands";
 
 using os::Handler;
 
@@ -365,6 +369,26 @@ struct ControllerImpl::impl {
     ErrorCode status = complete_view.GetStatus();
     log::assert_that(status == ErrorCode::SUCCESS, "Status {}", ErrorCodeText(status));
     local_supported_commands_ = complete_view.GetSupportedCommands();
+
+    // Restored from the pre-23.0 controller.cc: honour bluetooth.hci.disabled_commands.
+    if (auto disabled = os::GetSystemProperty(kPropertyDisabledCommands)) {
+      size_t pos = 0;
+      while (pos <= disabled->size()) {
+        size_t end = disabled->find(',', pos);
+        if (end == std::string::npos) end = disabled->size();
+        std::string item = disabled->substr(pos, end - pos);
+        char* parse_end = nullptr;
+        long index = strtol(item.c_str(), &parse_end, 10);
+        if (!item.empty() && parse_end != nullptr && *parse_end == '\0' && index >= 0 &&
+            static_cast<size_t>(index / 10) < local_supported_commands_.size() && index % 10 < 8) {
+          local_supported_commands_[index / 10] &= ~(1 << (index % 10));
+          log::info("Disabled HCI command index {} (bluetooth.hci.disabled_commands)", index);
+        } else if (!item.empty()) {
+          log::warn("Ignoring invalid bluetooth.hci.disabled_commands entry '{}'", item);
+        }
+        pos = end + 1;
+      }
+    }
   }
 
   void read_local_extended_features_complete_handler(std::promise<void> promise,
